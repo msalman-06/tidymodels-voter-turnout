@@ -1,0 +1,149 @@
+---
+title: "Vignette 2: Predicting Voter Turnout with tidymodels"
+author: "Mustafa Salman"
+date: today
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+Applying the tidymodels workflow to a new problem: predicting whether a U.S. county has high or low voter turnout based on socioeconomic data. This is a binary classification problem — the outcome has two levels (High/Low) rather than a continuous number. Data is simulated to mirror the structure of the MIT Election Lab county-level dataset (https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/VOQCHQ).
+
+```{r}
+library(tidymodels) # core modeling ecosystem
+library(tidyverse)  # data wrangling and ggplot
+library(vip)        # variable importance plots
+library(knitr)      # kable() for clean tables
+```
+
+```{r}
+set.seed(123) # makes the random simulation reproducible
+
+turnout <- tibble(
+  county        = paste("County", 1:500),
+  median_income = rnorm(500, 55000, 12000),  # normally distributed around $55k
+  pct_college   = runif(500, 0.15, 0.65),    # uniform between 15% and 65%
+  pop_density   = rexp(500, rate = 1/500),   # right-skewed — most counties are sparse
+  pct_white     = runif(500, 0.3, 0.95),
+  region        = sample(c("South","Midwest","Northeast","West"),
+                         500, replace = TRUE),
+  # turnout is modeled as a function of income and education
+  # this matches what the political science literature actually finds
+  turnout_pct   = 0.3 + 0.0000045*median_income +
+                  0.35*pct_college + rnorm(500, 0, 0.06)
+) %>%
+  mutate(
+    # convert continuous turnout to binary: High if above median, Low if below
+    # this is the outcome we're trying to predict
+    high_turnout = factor(ifelse(turnout_pct > median(turnout_pct),
+                                 "High", "Low")),
+    region = factor(region) # needs to be a factor for step_dummy() later
+  )
+```
+
+```{r}
+# boxplots by class — checking whether the predictors actually separate High from Low
+# if the boxes don't overlap much, the model should work well
+turnout %>%
+  select(high_turnout, median_income, pct_college) %>%
+  pivot_longer(-high_turnout) %>%
+  ggplot(aes(x = high_turnout, y = value, fill = high_turnout)) +
+  geom_boxplot(alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(~name, scales = "free_y") +
+  scale_fill_manual(values = c("High" = "#533483", "Low" = "#a78bca")) +
+  theme_minimal()
+```
+
+Counties with high turnout have higher income and more college education, which is consistent with the political science literature.
+
+```{r}
+set.seed(42)
+
+# split 75% training, 25% testing
+# strata = high_turnout ensures both splits have roughly equal High/Low proportions
+# without stratifying, random chance could give us an imbalanced split
+splits   <- initial_split(turnout, prop = 0.75, strata = high_turnout)
+to_train <- training(splits)
+to_test  <- testing(splits)
+```
+
+```{r}
+# a recipe defines all preprocessing steps before modeling
+to_rec <- recipe(
+  high_turnout ~ median_income + pct_college +
+    pop_density + pct_white + region,
+  data = to_train
+) %>%
+  # normalize so income (in the 50,000s) doesn't dominate predictors on a 0-1 scale
+  # sets each numeric predictor to mean = 0, sd = 1
+  step_normalize(all_numeric_predictors()) %>%
+  # convert region (a factor) into dummy variables
+  # models need numbers — this creates binary columns like region_South, region_West
+  step_dummy(all_nominal_predictors())
+```
+
+```{r}
+# logistic regression is the right choice for binary classification
+# it predicts the probability of "High" and classifies above/below 0.5
+# set_engine("glm") uses base R's glm() function under the hood
+to_fit <- workflow() %>%
+  add_recipe(to_rec) %>%
+  add_model(logistic_reg() %>% set_engine("glm")) %>%
+  fit(data = to_train) # fit only on training data — test set stays hidden until eval
+```
+
+```{r}
+# augment() runs predictions on the test set and appends them to the data
+# .pred_class = predicted label, .pred_High = predicted probability of High
+to_preds <- augment(to_fit, new_data = to_test)
+
+# accuracy = % of counties correctly classified
+# roc_auc = how well the model separates High from Low at all thresholds
+# 1.0 is perfect, 0.5 is no better than random guessing
+bind_rows(
+  accuracy(to_preds, truth = high_turnout, estimate = .pred_class),
+  roc_auc(to_preds,  truth = high_turnout, .pred_High)
+) %>%
+  select(.metric, .estimate) %>%
+  kable(digits = 3)
+```
+
+```{r}
+# ROC curve plots sensitivity vs 1-specificity at every possible threshold
+# a good model hugs the top-left corner — the dotted diagonal is random chance
+roc_curve(to_preds, truth = high_turnout, .pred_High) %>%
+  autoplot() +
+  labs(title    = "ROC Curve: Voter Turnout",
+       subtitle = "AUC = 0.88") +
+  theme_minimal()
+```
+
+```{r}
+# confusion matrix — rows are predictions, columns are actual values
+# diagonal = correct, off-diagonal = errors
+# darker = higher count
+conf_mat(to_preds, truth = high_turnout,
+         estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  scale_fill_gradient(low = "#e8d5f5", high = "#533483") +
+  theme_minimal()
+```
+
+```{r}
+# variable importance — which predictors contributed most to the model's decisions
+# extract_fit_parsnip() pulls the underlying glm object out of the workflow
+to_fit %>%
+  extract_fit_parsnip() %>%
+  vip(num_features = 5,
+      aesthetics = list(fill = "#533483", alpha = 0.85)) +
+  labs(title = "Variable Importance: Voter Turnout") +
+  theme_minimal()
+```
+
+77% accuracy and AUC of 0.88. Education and income are the strongest predictors which makes sense. Main limitation is ecological fallacy — county averages don't tell us about individual voters.
+
+```{r}
+citation("tidymodels")
+citation("vip")
+```

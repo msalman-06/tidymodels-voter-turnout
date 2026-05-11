@@ -1,0 +1,108 @@
+---
+title: "Vignette 1: Build a Model with tidymodels"
+author: "Mustafa Salman"
+date: today
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+Following the official tidymodels "Build a Model" tutorial at https://www.tidymodels.org/start/models/
+
+The data is from Constable (1993) and looks at how three feeding regimes affect the suture width of sea urchins over time.
+
+```{r}
+library(tidymodels) # umbrella package — loads parsnip, recipes, rsample, yardstick, etc.
+library(readr)      # for read_csv
+library(broom)      # tidy() turns model output into a clean tibble
+library(dotwhisker) # dwplot() makes coefficient plots
+```
+
+```{r}
+urchins <- read_csv("https://tidymodels.org/start/models/urchins.csv") |>
+  # rename columns to something readable
+  setNames(c("food_regime", "initial_volume", "width")) |>
+  # food_regime needs to be a factor so R treats it as categorical
+  # order matters here — "Initial" is the reference level
+  mutate(food_regime = factor(food_regime,
+                              levels = c("Initial", "Low", "High")))
+```
+
+```{r}
+# plot initial_volume vs width, one regression line per feeding regime
+# if the slopes look different by group, we need an interaction term
+ggplot(urchins, aes(x = initial_volume, y = width,
+                    color = food_regime, group = food_regime)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal()
+```
+
+The slopes look different by feeding regime so an interaction term makes sense.
+
+```{r}
+# in tidymodels you specify the model type and engine separately
+# this means you can swap engines (e.g. "stan" for Bayesian) without
+# changing anything else in the workflow
+lm_mod <- linear_reg() |>
+  set_engine("lm") # use base R's lm() function to fit
+
+# fit the model — * creates an interaction between initial_volume and food_regime
+# meaning the slope of initial_volume is allowed to differ by food_regime
+lm_fit <- lm_mod |>
+  fit(width ~ initial_volume * food_regime, data = urchins)
+
+# tidy() gives us a clean tibble of coefficients instead of the messy base R output
+# estimate = effect size, p.value = same interpretation as in ModernDive
+tidy(lm_fit)
+```
+
+```{r}
+# dwplot makes a coefficient plot — dots are estimates, whiskers are confidence intervals
+# the dashed line at 0 is the null hypothesis (no effect)
+# anything clearly to the right = positive effect on width
+tidy(lm_fit) |>
+  dwplot(
+    dot_args     = list(size = 2, color = "#0f3460"),
+    whisker_args = list(color = "#0f3460"),
+    vline = geom_vline(xintercept = 0, linetype = "dashed",
+                       color = "gray50")
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# generate new data to predict from — one row per food regime, all at volume = 20
+new_points <- expand.grid(
+  initial_volume = 20,
+  food_regime    = c("Initial", "Low", "High")
+)
+
+# predict() returns the mean predicted width for each new point
+mean_pred <- predict(lm_fit, new_data = new_points)
+
+# type = "conf_int" gives us upper and lower bounds — same idea as
+# the confidence intervals we built with bootstrapping in class
+conf_int <- predict(lm_fit, new_data = new_points, type = "conf_int")
+
+# bind everything together into one tidy tibble for plotting
+plot_data <- new_points |>
+  bind_cols(mean_pred) |>
+  bind_cols(conf_int)
+
+ggplot(plot_data, aes(x = food_regime)) +
+  geom_point(aes(y = .pred), size = 3, color = "#0f3460") +
+  geom_errorbar(aes(ymin = .pred_lower, ymax = .pred_upper),
+                width = 0.15, color = "#0f3460") +
+  labs(x = "Food Regime", y = "Predicted Width") +
+  theme_minimal()
+```
+
+Urchins in the High feeding regime are predicted to be wider at 20mL. The confidence intervals for Initial and Low overlap, so we can't distinguish those two clearly.
+
+The main thing tidymodels adds here over base R: swapping `set_engine("lm")` for `set_engine("stan")` fits a Bayesian model with the exact same code — `fit()`, `predict()`, and `tidy()` all work identically regardless of engine.
+
+```{r}
+citation("tidymodels")
+```

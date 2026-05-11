@@ -1,0 +1,285 @@
+---
+title: "Predicting Voter Turnout with tidymodels"
+subtitle: "A Modern Machine Learning Ecosystem in R"
+author: "Mustafa Salman"
+date: today
+format:
+  beamer:
+    theme: metropolis
+    colortheme: default
+    fonttheme: structurebold
+    slide-level: 2
+    keep-tex: false
+    fig-width: 6
+    fig-height: 3.5
+    fontsize: 10pt
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup, include=FALSE}
+library(tidymodels)
+library(tidyverse)
+library(vip)
+library(knitr)
+library(palmerpenguins)
+
+set.seed(123)
+turnout <- tibble(
+  county        = paste("County", 1:500),
+  median_income = rnorm(500, 55000, 12000),
+  pct_college   = runif(500, 0.15, 0.65),
+  pop_density   = rexp(500, rate = 1/500),
+  pct_white     = runif(500, 0.3, 0.95),
+  region        = sample(c("South","Midwest","Northeast","West"),
+                         500, replace = TRUE),
+  turnout_pct   = 0.3 + 0.0000045*median_income +
+                  0.35*pct_college + rnorm(500, 0, 0.06)
+) %>%
+  mutate(
+    high_turnout = factor(ifelse(turnout_pct > median(turnout_pct),
+                                 "High", "Low")),
+    region = factor(region)
+  )
+
+set.seed(42)
+pen_split <- initial_split(drop_na(penguins), prop = 0.75,
+                            strata = species)
+pen_train <- training(pen_split)
+pen_test  <- testing(pen_split)
+
+pen_fit <- workflow() %>%
+  add_recipe(
+    recipe(species ~ bill_length_mm + bill_depth_mm +
+             flipper_length_mm + body_mass_g,
+           data = pen_train) %>%
+      step_normalize(all_numeric_predictors())
+  ) %>%
+  add_model(multinom_reg() %>% set_engine("nnet")) %>%
+  fit(data = pen_train)
+
+pen_preds <- augment(pen_fit, new_data = pen_test)
+
+set.seed(42)
+to_split <- initial_split(turnout, prop = 0.75, strata = high_turnout)
+to_train <- training(to_split)
+to_test  <- testing(to_split)
+
+to_fit <- workflow() %>%
+  add_recipe(
+    recipe(high_turnout ~ median_income + pct_college +
+             pop_density + pct_white + region,
+           data = to_train) %>%
+      step_normalize(all_numeric_predictors()) %>%
+      step_dummy(all_nominal_predictors())
+  ) %>%
+  add_model(logistic_reg() %>% set_engine("glm")) %>%
+  fit(data = to_train)
+
+to_preds <- augment(to_fit, new_data = to_test)
+```
+
+## Who votes — and can we predict it?
+
+- ~60% of eligible Americans voted in 2020, but turnout varies a lot by county
+- Campaigns and policymakers want to know: who shows up?
+- We have covered regression and inference — tidymodels asks a different question: how accurately can we *classify* counties?
+
+## From inference to prediction
+
+\begin{columns}
+\begin{column}{0.48\textwidth}
+\textbf{What we have done}
+\begin{itemize}
+  \item Regression: why does turnout vary?
+  \item Inference: is income significant?
+  \item Bootstrapping: how certain are we?
+\end{itemize}
+\end{column}
+\begin{column}{0.48\textwidth}
+\textbf{What tidymodels adds}
+\begin{itemize}
+  \item How accurately can we classify?
+  \item Honest train/test evaluation
+  \item One workflow for any model
+\end{itemize}
+\end{column}
+\end{columns}
+
+\vspace{0.5em}
+\begin{block}{}
+\texttt{tidymodels} is to machine learning what \texttt{tidyverse} is to data wrangling.
+\end{block}
+
+## What is tidymodels?
+
+A family of packages, one grammar for the whole modeling process:
+
+| Package | Role |
+|------------|--------------------------|
+| `rsample` | Train/test splits |
+| `recipes` | Preprocessing |
+| `parsnip` | Model specification |
+| `workflows` | Bundle recipe + model |
+| `yardstick` | Evaluate performance |
+
+Same tidy principles — just applied to modeling.
+
+## The tidymodels workflow
+
+```{r workflow-diagram, echo=FALSE, fig.height=2, fig.width=7}
+nodes  <- tibble(label = c("Split","Recipe","Model","Workflow","Evaluate"),
+                 x = 1:5, y = 1)
+arrows <- tibble(x = 1:4 + 0.3, xend = 2:5 - 0.3, y = 1, yend = 1)
+
+ggplot() +
+  geom_segment(data = arrows,
+               aes(x=x, xend=xend, y=y, yend=yend),
+               arrow = arrow(length = unit(0.25,"cm"), type="closed"),
+               color = "#e94560", linewidth = 0.8) +
+  geom_point(data = nodes, aes(x, y), size = 13, color = "#0f3460") +
+  geom_text(data = nodes, aes(x, y, label = label),
+            color = "white", fontface = "bold", size = 3.2) +
+  theme_void() +
+  xlim(0.5, 5.5) + ylim(0.5, 1.5)
+```
+
+Each step is modular — swap the model without rewriting anything else.
+
+## Vignette: penguin species classification
+
+*Official tidymodels tutorial — predicting species from physical measurements*
+
+```{r pen-code, echo=TRUE, eval=FALSE}
+splits <- initial_split(penguins, prop = 0.75,
+                        strata = species)
+train  <- training(splits)
+test   <- testing(splits)
+
+rec <- recipe(species ~ bill_length_mm +
+  bill_depth_mm + flipper_length_mm +
+  body_mass_g, data = train) %>%
+  step_normalize(all_numeric_predictors())
+
+wf <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(multinom_reg() %>%
+              set_engine("nnet")) %>%
+  fit(data = train)
+```
+
+## Vignette results — 97.6% accuracy
+
+```{r pen-plot, fig.height=3.2, fig.width=5.5}
+conf_mat(pen_preds, truth = species,
+         estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  scale_fill_gradient(low = "#d6e4f7", high = "#0f3460") +
+  labs(title    = "Confusion Matrix: Penguin Species",
+       subtitle = "97.6% accuracy on test set") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+## My application: voter turnout
+
+Can county-level socioeconomic data predict whether a county has high or low turnout?
+
+| Predictor | Description |
+|----------------|-------------------------------|
+| `median_income` | County median household income |
+| `pct_college` | % adults with college degree |
+| `pop_density` | Population per sq. mile |
+| `pct_white` | Racial composition proxy |
+| `region` | US Census region |
+
+Outcome: `high_turnout` — above/below county median (binary)
+
+## Building the model
+
+```{r to-code, echo=TRUE, eval=FALSE}
+splits <- initial_split(turnout, prop = 0.75,
+                        strata = high_turnout)
+
+rec <- recipe(
+  high_turnout ~ median_income + pct_college +
+    pop_density + pct_white + region,
+  data = train
+) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+
+wf <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(logistic_reg() %>%
+              set_engine("glm")) %>%
+  fit(data = train)
+```
+
+## Results: 77% accuracy, AUC 0.88
+
+```{r roc-plot, fig.height=3.2, fig.width=5.5}
+roc_curve(to_preds, truth = high_turnout,
+          .pred_High) %>%
+  autoplot() +
+  labs(title    = "ROC Curve: Voter Turnout",
+       subtitle = "AUC = 0.88  |  Accuracy = 77%") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+## What predicts turnout?
+
+```{r vip-plot, fig.height=3.2, fig.width=5.5}
+to_fit %>%
+  extract_fit_parsnip() %>%
+  vip(num_features = 5,
+      aesthetics = list(fill = "#533483", alpha = 0.85)) +
+  labs(title    = "Variable Importance: Voter Turnout",
+       subtitle = "Education and income dominate",
+       x = "Importance", y = "Predictor") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+## Confusion matrix
+
+```{r conf-plot, fig.height=3.2, fig.width=5.5}
+conf_mat(to_preds, truth = high_turnout,
+         estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  scale_fill_gradient(low = "#e8d5f5", high = "#533483") +
+  labs(title    = "Confusion Matrix: Voter Turnout",
+       subtitle = "How often did the model get it right?") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+## Takeaways
+
+**What we found**
+
+- Education and income are the strongest predictors — consistent with the political science literature
+
+**Why tidymodels?**
+
+- One workflow for any model — swap `logistic_reg()` for `rand_forest()` in one line
+- Train/test split gives an honest accuracy estimate
+- Natural extension of regression and inference from class
+
+**Limitations**
+
+- Ecological fallacy: county averages are not individual behavior
+- Simulated data — real application would use MIT Election Lab
+
+## Thank you
+
+- tidymodels documentation: tidymodels.org
+- MIT Election Lab: dataverse.harvard.edu
+- GitHub: github.com/msalman-06/tidymodels-voter-turnout
+
+```r
+
+```
